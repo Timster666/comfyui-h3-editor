@@ -47,6 +47,8 @@ RUN pip install jupyterlab
 
 # Workflows bundled with the image (put .json files in the repo's workflows/ folder)
 COPY workflows/ /opt/default_workflows/
+# LoRAs bundled with the image (put .safetensors files in the repo's loras/ folder)
+COPY loras/ /opt/default_loras/
 COPY start.sh /start.sh
 RUN chmod +x /start.sh
 

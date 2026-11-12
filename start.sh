@@ -52,6 +52,7 @@ fi
 # Custom nodes built into the image that the volume doesn't have yet (never
 # overwrites a node folder that's already there).
 for node in /opt/ComfyUI/custom_nodes/*/; do
+  [[ -d "$node" ]] || continue
   name="$(basename "$node")"
   if [[ ! -e "$COMFY/custom_nodes/$name" ]]; then
     echo "[start] Adding custom node: $name"
@@ -101,6 +102,14 @@ for wf in /opt/default_workflows/*.json; do
   [[ -e "$wf" ]] || continue
   if [[ ! -e "$WF_DIR/$(basename "$wf")" ]]; then
     cp "$wf" "$WF_DIR/" && echo "[start] Added workflow: $(basename "$wf")"
+  fi
+done
+
+# Bundled LoRAs → models/loras (never overwrites a file that's already there)
+for lora in /opt/default_loras/*.safetensors; do
+  [[ -e "$lora" ]] || continue
+  if [[ ! -e "$MODELS/loras/$(basename "$lora")" ]]; then
+    cp "$lora" "$MODELS/loras/" && echo "[start] Added LoRA: $(basename "$lora")"
   fi
 done
 
