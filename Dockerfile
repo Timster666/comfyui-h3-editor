@@ -35,8 +35,10 @@ RUN git clone https://github.com/Comfy-Org/ComfyUI-Manager.git /opt/ComfyUI/cust
 # H3 Editor custom node (https://github.com/igorls/comfyui-h3-editor).
 # Its requirements bring imageio-ffmpeg (video import/export) and gguf (HyperFlow GGUF files).
 # The constraint keeps the PyTorch installed above, so no node can swap it out.
+# Pinned to a release. To change version, edit H3_EDITOR_REF (a tag like v0.4.1, or "main" for the newest).
+ARG H3_EDITOR_REF=v0.4.1
 RUN pip freeze | grep -iE "^(torch|torchvision|torchaudio)==" > /opt/torch-constraints.txt \
-    && git clone https://github.com/igorls/comfyui-h3-editor.git /opt/ComfyUI/custom_nodes/comfyui-h3-editor \
+    && git clone --depth 1 --branch ${H3_EDITOR_REF} https://github.com/igorls/comfyui-h3-editor.git /opt/ComfyUI/custom_nodes/comfyui-h3-editor \
     && pip install -r /opt/ComfyUI/custom_nodes/comfyui-h3-editor/requirements.txt -c /opt/torch-constraints.txt
 
 # Hugging Face CLI with Xet support (Xet-backed repos = fast downloads)

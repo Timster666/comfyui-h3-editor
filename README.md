@@ -48,10 +48,10 @@ Switch on the ones you want, all from Hugging Face. They appear in H3 Editor's *
 | `ENABLE_SINGULARITY` | Singularity v2 | 21 GB |
 | `ENABLE_10EROS` | 10Eros Max beta 7 | 23 GB |
 
-**Other:** `UPDATE_COMFYUI=true` updates ComfyUI, Manager and H3 Editor on start. `JUPYTER_PASSWORD` sets a Jupyter login. `COMFY_ARGS` adds ComfyUI flags. `HF_TOKEN` is a Hugging Face token.
+**Other:** `UPDATE_COMFYUI=true` updates ComfyUI and Manager on start. `JUPYTER_PASSWORD` sets a Jupyter login. `COMFY_ARGS` adds ComfyUI flags. `HF_TOKEN` is a Hugging Face token.
 
 ## What's included
-- ComfyUI + ComfyUI-Manager + **H3 Editor**, PyTorch for CUDA 13.0
+- ComfyUI + ComfyUI-Manager + **H3 Editor 0.4.1**, PyTorch for CUDA 13.0
 - JupyterLab (no password), port 8888
 - Everything in `/workspace/ComfyUI` (`custom_nodes`, `models`, `output`…). Custom nodes persist.
 

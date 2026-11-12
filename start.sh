@@ -24,7 +24,7 @@ CIVITAI_TOKEN="${CIVITAI_TOKEN:-}"                      # only if Civitai asks f
 
 # ---- Other settings ---------------------------------------------------------
 SKIP_DOWNLOAD="${SKIP_DOWNLOAD:-false}"
-UPDATE_COMFYUI="${UPDATE_COMFYUI:-false}"        # true = git pull ComfyUI, Manager and H3 Editor on boot
+UPDATE_COMFYUI="${UPDATE_COMFYUI:-false}"        # true = update ComfyUI + Manager on boot (H3 Editor stays at its pinned release)
 INSTALL_NODE_REQS="${INSTALL_NODE_REQS:-true}"   # reinstall custom nodes' Python packages on boot
 COMFY_ARGS="${COMFY_ARGS:-}"                     # extra flags, e.g. --lowvram
 ENABLE_JUPYTER="${ENABLE_JUPYTER:-true}"         # JupyterLab on port 8888
@@ -82,11 +82,9 @@ mkdir -p "$MODELS"/{diffusion_models/hyperflow,text_encoders,vae,vae_approx,lora
 CONSTRAINTS=()
 [[ -f /opt/torch-constraints.txt ]] && CONSTRAINTS=(-c /opt/torch-constraints.txt)   # keep the image's PyTorch
 if [[ "$UPDATE_COMFYUI" == "true" ]]; then
-  echo "[start] Updating ComfyUI, ComfyUI-Manager and H3 Editor ..."
+  echo "[start] Updating ComfyUI and ComfyUI-Manager ..."
   git -C "$COMFY" pull --ff-only || echo "[start] ComfyUI update failed (continuing)"
-  for n in ComfyUI-Manager comfyui-h3-editor; do
-    git -C "$COMFY/custom_nodes/$n" pull --ff-only 2>/dev/null || true
-  done
+  git -C "$COMFY/custom_nodes/ComfyUI-Manager" pull --ff-only 2>/dev/null || true
 fi
 pip install -q -r "$COMFY/requirements.txt" "${CONSTRAINTS[@]}" || echo "[start] ComfyUI requirements install failed (continuing)"
 if [[ "$INSTALL_NODE_REQS" == "true" ]]; then
