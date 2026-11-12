@@ -16,9 +16,11 @@ HYPERFLOW_GGUF_QUANT="${HYPERFLOW_GGUF_QUANT:-Q4_K_M}"  # with gguf: Q8_0 | Q6_K
 LATENT_UPSCALER="${LATENT_UPSCALER:-true}"              # finals up to 1920 px (0.7 GB)
 REALISM_LORA="${REALISM_LORA:-true}"                    # MMH3-Realism-V2 LoRA from Civitai (71 MB)
 LIVE_PREVIEW="${LIVE_PREVIEW:-true}"                    # taeh3 moving live preview (23 MB)
-# Extra checkpoint profile (off by default)
-ENABLE_H3_TURBO="${ENABLE_H3_TURBO:-false}"             # MiniMax H3 Turbo: 2 x 21 GB + Turbo v4 LoRA
-CIVITAI_TOKEN="${CIVITAI_TOKEN:-}"                      # only if Civitai asks for a login
+# Extra checkpoints for H3 Editor's Model menu (all off by default)
+ENABLE_MINIMAX_H3="${ENABLE_MINIMAX_H3:-${ENABLE_H3_TURBO:-false}}"  # MiniMax H3 + H3 Turbo: 2 x 21 GB + Turbo LoRA
+ENABLE_SINGULARITY="${ENABLE_SINGULARITY:-false}"       # Singularity v2 (Hugging Face, 21 GB)
+ENABLE_10EROS="${ENABLE_10EROS:-false}"                 # 10Eros Max beta 7 (Hugging Face, 22.9 GB)
+CIVITAI_TOKEN="${CIVITAI_TOKEN:-}"                      # only if Civitai asks for a login (Realism LoRA)
 
 # ---- Other settings ---------------------------------------------------------
 SKIP_DOWNLOAD="${SKIP_DOWNLOAD:-false}"
@@ -131,15 +133,25 @@ if is_on "$ENABLE_HYPERFLOW"; then
     *) echo "[start] Unknown HYPERFLOW_FORMAT=$HYPERFLOW_FORMAT (use int8 or gguf)"; exit 1 ;;
   esac
 fi
-if is_on "$ENABLE_H3_TURBO"; then
+if is_on "$ENABLE_MINIMAX_H3"; then
   FILES+=("Comfy-Org/MiniMax-H3|minimax_h3_ref2va_pruned_int8_convrot.safetensors|diffusion_models"
           "Comfy-Org/MiniMax-H3|minimax_h3_fl2va_pruned_int8_convrot.safetensors|diffusion_models"
           "larryvrh/MiniMax-H3-Turbo-Lora|minimax_h3_turbo_v4_step600_ema.safetensors|loras")
 fi
+is_on "$ENABLE_SINGULARITY" && FILES+=("WarmBloodAban/Minimax-h3_Singularity|Minimax-h3_Singularity_ref2va_v2_pruned_int8.safetensors|diffusion_models")
+is_on "$ENABLE_10EROS"      && FILES+=("TenStrip/10Eros-Max|10Eros_Max_h3_8stepTURBO_beta7_fix1-native_int8_protected_edges_HQ.safetensors|diffusion_models")
 is_on "$LATENT_UPSCALER" && FILES+=("LBH-123-AI/Minimax_h3_latent_Upscaler|minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors|latent_upscale_models")
 is_on "$LIVE_PREVIEW"    && FILES+=("OzzyGT/taeh3|taeh3.safetensors|vae_approx")
-is_on "$ENABLE_HYPERFLOW" || is_on "$ENABLE_H3_TURBO" || \
-  echo "[start] !!! No checkpoint selected (ENABLE_HYPERFLOW and ENABLE_H3_TURBO are both false) — H3 Editor can't render."
+# Civitai downloads: "model-id|version regex|file regex|file exclude regex|save as|folder|already-there glob"
+# The file is saved under the name H3 Editor looks for.
+CIVITAI=()
+is_on "$REALISM_LORA" && CIVITAI+=("3041489|v2|realism.*\.safetensors$|hyperflow|MMH3-Realism-V2.safetensors|loras|MMH3-Realism*.safetensors")
+
+any_model=false
+for v in ENABLE_HYPERFLOW ENABLE_MINIMAX_H3 ENABLE_SINGULARITY ENABLE_10EROS; do
+  is_on "${!v}" && any_model=true
+done
+$any_model || echo "[start] !!! No checkpoint switched on — H3 Editor can't render. Set ENABLE_HYPERFLOW=true."
 
 # ---- Download (skips files already on the volume) ---------------------------
 wait_for_network() {
@@ -170,29 +182,49 @@ fetch_hf() {
   mv -f "$found" "$MODELS/$dest/$name"
 }
 
-# MMH3-Realism LoRA from Civitai (model 3041489), via Civitai's public API
-fetch_civitai_realism() {
-  local dir="$MODELS/loras"
-  compgen -G "$dir/MMH3-Realism*.safetensors" >/dev/null && return 0
-  echo "[start] Downloading MMH3-Realism LoRA from Civitai ..."
-  CIVITAI_TOKEN="$CIVITAI_TOKEN" DEST="$dir" python3 - <<'PY' || return 1
-import json, os, sys, urllib.request
+# Civitai downloads via Civitai's public API: picks the version and file by name
+civitai_present() {   # true when the file, or a file H3 Editor also accepts, is already there
+  local dir="$MODELS/$1" save="$2" glob="$3"
+  [[ -s "$dir/$save" ]] && return 0
+  [[ -n "$glob" ]] && compgen -G "$dir/$glob" >/dev/null && return 0
+  return 1
+}
+fetch_civitai() {
+  local model="$1" vre="$2" fre="$3" xre="$4" save="$5" dir="$6"
+  mkdir -p "$MODELS/$dir"
+  echo "[start] Downloading $save from Civitai (model $model) ..."
+  CIVITAI_TOKEN="$CIVITAI_TOKEN" python3 - "$model" "$vre" "$fre" "$xre" "$MODELS/$dir/$save" <<'PY'
+import json, os, re, sys, urllib.request
+model, vre, fre, xre, dest = sys.argv[1:6]
 try:
   tok = os.environ.get("CIVITAI_TOKEN", "")
   hdr = {"User-Agent": "runpod-h3-template"}
   if tok: hdr["Authorization"] = "Bearer " + tok
   api = json.load(urllib.request.urlopen(urllib.request.Request(
-      "https://civitai.com/api/v1/models/3041489", headers=hdr), timeout=60))
-  ver = api["modelVersions"][0]
-  files = [f for f in ver["files"] if f.get("primary")] or ver["files"]
-  f = files[0]
-  dest = os.path.join(os.environ["DEST"], f["name"])
-  req = urllib.request.Request(f["downloadUrl"], headers=hdr)
-  with urllib.request.urlopen(req, timeout=600) as r, open(dest + ".part", "wb") as out:
-      while chunk := r.read(1 << 20):
-          out.write(chunk)
+      "https://civitai.com/api/v1/models/" + model, headers=hdr), timeout=60))
+  picks = []
+  for v in api.get("modelVersions", []):
+    if not re.search(vre, v.get("name", ""), re.I):
+      continue
+    for f in v.get("files", []):
+      n = f.get("name", "")
+      if re.search(fre, n, re.I) and not (xre and re.search(xre, n, re.I)):
+        picks.append((v["name"], f))
+  if not picks:
+    print("[start]   no matching file. Versions on Civitai:")
+    for v in api.get("modelVersions", []):
+      print("[start]     %s: %s" % (v.get("name"), ", ".join(f.get("name", "") for f in v.get("files", []))))
+    sys.exit(1)
+  vname, f = picks[0]
+  print("[start]   %s -> %s" % (vname, f["name"]))
+  with urllib.request.urlopen(urllib.request.Request(f["downloadUrl"], headers=hdr), timeout=600) as r, \
+       open(dest + ".part", "wb") as out:
+    while chunk := r.read(1 << 22):
+      out.write(chunk)
   os.replace(dest + ".part", dest)
-  print("[start]   saved", f["name"])
+  print("[start]   saved as", os.path.basename(dest))
+except SystemExit:
+  raise
 except Exception as e:
   print("[start]   Civitai download failed:", e); sys.exit(1)
 PY
@@ -213,11 +245,18 @@ if [[ "$SKIP_DOWNLOAD" != "true" ]]; then
       done
     done
     rm -rf "$MODELS/.downloads"
-    if is_on "$REALISM_LORA"; then
-      fetch_civitai_realism || echo "[start] !!! Couldn't download the Realism LoRA from Civitai (set CIVITAI_TOKEN if it needs a login). Finals still render without it."
-    fi
+    for e in ${CIVITAI[@]+"${CIVITAI[@]}"}; do
+      IFS='|' read -r model vre fre xre save dir glob <<< "$e"
+      civitai_present "$dir" "$save" "$glob" && continue
+      fetch_civitai "$model" "$vre" "$fre" "$xre" "$save" "$dir" || \
+        echo "[start] !!! Couldn't download $save from Civitai (Civitai down, or set CIVITAI_TOKEN). Restart the pod to retry."
+    done
   fi
 
+  for e in ${CIVITAI[@]+"${CIVITAI[@]}"}; do
+    IFS='|' read -r model vre fre xre save dir glob <<< "$e"
+    civitai_present "$dir" "$save" "$glob" && echo "[start]   ✓ $dir/$save" || echo "[start] !!!   missing from Civitai: $dir/$save"
+  done
   mapfile -t STILL_MISSING < <(missing_files)
   if (( ${#STILL_MISSING[@]} )); then
     echo "[start] !!! These model files are MISSING:"

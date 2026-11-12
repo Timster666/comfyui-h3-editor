@@ -15,7 +15,7 @@ Ready-to-use ComfyUI with **H3 Editor**, a video editor for MiniMax H3, plus Jup
 | **48 GB+** (L40S, A6000, A100, H100) | Nothing to change (recommended) |
 | **24–32 GB** (RTX 4090, RTX 5090) | Set `HYPERFLOW_FORMAT` to `gguf` |
 
-💡 Pick **64 GB+ system RAM** and a **Volume Disk of 75 GB** (120 GB with `ENABLE_H3_TURBO`).
+💡 Pick **64 GB+ system RAM** and a **Volume Disk of 100 GB**. Add ~25 GB for each extra model below.
 
 To change a setting, click **Edit Template** when you deploy and change it in the **Environment Variables**.
 
@@ -37,8 +37,16 @@ Always downloaded (from Comfy-Org/MiniMax-H3):
 | `LATENT_UPSCALER` | `true` | Finals up to 1920 px (0.7 GB) |
 | `REALISM_LORA` | `true` | MMH3-Realism LoRA from Civitai, natural skin in finals |
 | `LIVE_PREVIEW` | `true` | Moving live preview while rendering (23 MB) |
-| `ENABLE_H3_TURBO` | `false` | Extra "MiniMax H3 Turbo" profile (42 GB + Turbo LoRA) |
-| `CIVITAI_TOKEN` | — | Only if Civitai asks for a login for the LoRA |
+| `CIVITAI_TOKEN` | — | Only if Civitai asks for a login for the Realism LoRA |
+
+## Extra models (all `false` by default)
+Switch on the ones you want, all from Hugging Face. They appear in H3 Editor's **Model** menu.
+
+| Variable | Model | Size |
+|---|---|---|
+| `ENABLE_MINIMAX_H3` | MiniMax H3 + MiniMax H3 Turbo | 42 GB |
+| `ENABLE_SINGULARITY` | Singularity v2 | 21 GB |
+| `ENABLE_10EROS` | 10Eros Max beta 7 | 23 GB |
 
 **Other:** `UPDATE_COMFYUI=true` updates ComfyUI, Manager and H3 Editor on start. `JUPYTER_PASSWORD` sets a Jupyter login. `COMFY_ARGS` adds ComfyUI flags. `HF_TOKEN` is a Hugging Face token.
 
