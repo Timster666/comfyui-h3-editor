@@ -51,8 +51,8 @@ Switch on the ones you want, all from Hugging Face. They appear in H3 Editor's *
 **Other:** `UPDATE_COMFYUI=true` updates ComfyUI and Manager on start. `JUPYTER_PASSWORD` sets a Jupyter login. `COMFY_ARGS` adds ComfyUI flags. `HF_TOKEN` is a Hugging Face token.
 
 ## What's included
-- ComfyUI + ComfyUI-Manager + **H3 Editor 0.4.1**, PyTorch for CUDA 13.0
-- **Project zips**: in H3 Editor's project menu, **Download as zip** saves a project to your computer and **Open a project zip** brings it back on any pod. Use it to keep your work without a volume. (A patch on top of 0.4.1, in `patches/`.)
+- ComfyUI + ComfyUI-Manager + **H3 Editor 0.5.0**, PyTorch for CUDA 13.0
+- **Project zips**: in H3 Editor's project menu, **Download as zip** saves a project to your computer and **Open a project zip** brings it back on any pod. Use it to keep your work without a volume. (A patch on top of 0.5.0, in `patches/`.)
 - JupyterLab (no password), port 8888
 - Everything in `/workspace/ComfyUI` (`custom_nodes`, `models`, `output`…). Custom nodes persist.
 

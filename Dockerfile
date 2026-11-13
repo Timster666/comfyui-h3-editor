@@ -36,7 +36,7 @@ RUN git clone https://github.com/Comfy-Org/ComfyUI-Manager.git /opt/ComfyUI/cust
 # Its requirements bring imageio-ffmpeg (video import/export) and gguf (HyperFlow GGUF files).
 # The constraint keeps the PyTorch installed above, so no node can swap it out.
 # Pinned to a release. To change version, edit H3_EDITOR_REF (a tag like v0.4.1, or "main" for the newest).
-ARG H3_EDITOR_REF=v0.4.1
+ARG H3_EDITOR_REF=v0.5.0
 # Our own changes to the editor, kept as patches per release: patches/<H3_EDITOR_REF>/*.patch.
 # 0001-project-archives adds Download as zip / Open a project zip to the project menu.
 # A patch that no longer fits the release, or a release with no patches folder, stops the build,
