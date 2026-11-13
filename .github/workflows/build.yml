@@ -52,7 +52,7 @@ jobs:
             echo "version=v${{ github.run_number }}" >> "$GITHUB_OUTPUT"
             printf 'list<<EOF\n%s\n%s\nEOF\n' "${IMAGE}:latest" "${IMAGE}:v${{ github.run_number }}" >> "$GITHUB_OUTPUT"
           else
-            branch="$(echo "${GITHUB_REF_NAME}" | tr -c 'A-Za-z0-9_.-\n' '-')"
+            branch="$(echo "${GITHUB_REF_NAME}" | tr -c 'A-Za-z0-9_.\n-' '-')"
             echo "version=${branch}-v${{ github.run_number }}" >> "$GITHUB_OUTPUT"
             printf 'list<<EOF\n%s\nEOF\n' "${IMAGE}:${branch}-v${{ github.run_number }}" >> "$GITHUB_OUTPUT"
           fi
