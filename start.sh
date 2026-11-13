@@ -51,6 +51,19 @@ if [[ ! -f "$COMFY/main.py" ]]; then
   mkdir -p "$COMFY"
   cp -an /opt/ComfyUI/. "$COMFY/"    # -n: never overwrite input/output/user already there
 fi
+# H3 Editor: when the image has a different version than the volume, use the
+# image's (projects and presets live in output/h3take_projects, not here).
+H3_SRC=/opt/ComfyUI/custom_nodes/comfyui-h3-editor
+H3_DST="$COMFY/custom_nodes/comfyui-h3-editor"
+if [[ -d "$H3_SRC" && -d "$H3_DST" ]]; then
+  img_rev="$(git -C "$H3_SRC" rev-parse HEAD 2>/dev/null || true)"
+  vol_rev="$(git -C "$H3_DST" rev-parse HEAD 2>/dev/null || true)"
+  if [[ -n "$img_rev" && "$img_rev" != "$vol_rev" ]]; then
+    echo "[start] Updating H3 Editor on the volume to the image's version ($(git -C "$H3_SRC" describe --tags 2>/dev/null || echo "${img_rev:0:7}")) ..."
+    rm -rf "$H3_DST"
+  fi
+fi
+
 # Custom nodes built into the image that the volume doesn't have yet (never
 # overwrites a node folder that's already there).
 for node in /opt/ComfyUI/custom_nodes/*/; do
