@@ -1,17 +1,20 @@
 # Builds the ComfyUI + H3 Editor image in the cloud and pushes it to Docker Hub.
 # Runs whenever Dockerfile, start.sh or extra_model_paths.yaml change on main,
 # or manually from the Actions tab ("Run workflow").
+# Builds from main are tagged :latest and :vN. Builds from any other branch get only
+# :<branch>-vN, so trying a branch never changes the image your pods use.
 name: Build and push image
 
 on:
   push:
-    branches: [main]
+    branches: [main, project-archives]
     paths:
       - Dockerfile
       - start.sh
       - extra_model_paths.yaml
       - workflows/**
       - loras/**
+      - patches/**
       - .github/workflows/build.yml
   workflow_dispatch:
 
@@ -40,19 +43,29 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Tags every build twice: :latest and a version number (:v1, :v2, ...).
+      # main: :latest and a version number (:v1, :v2, ...). Other branches: :<branch>-vN only.
       # Use the version tag in RunPod to be sure you get exactly that build.
+      - name: Choose tags
+        id: tags
+        run: |
+          if [ "${GITHUB_REF_NAME}" = "main" ]; then
+            echo "version=v${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+            printf 'list<<EOF\n%s\n%s\nEOF\n' "${IMAGE}:latest" "${IMAGE}:v${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          else
+            branch="$(echo "${GITHUB_REF_NAME}" | tr -c 'A-Za-z0-9_.-\n' '-')"
+            echo "version=${branch}-v${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+            printf 'list<<EOF\n%s\nEOF\n' "${IMAGE}:${branch}-v${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: docker/build-push-action@v6
         with:
           context: .
           platforms: linux/amd64
           push: true
           provenance: false
-          tags: |
-            ${{ env.IMAGE }}:latest
-            ${{ env.IMAGE }}:v${{ github.run_number }}
+          tags: ${{ steps.tags.outputs.list }}
 
       - name: Summary
         run: |
-          echo "### ✅ Pushed \`${IMAGE}:v${{ github.run_number }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "Use this tag in your RunPod template (also available as \`:latest\`)." >> "$GITHUB_STEP_SUMMARY"
+          echo "### ✅ Pushed \`${IMAGE}:${{ steps.tags.outputs.version }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Use this tag in your RunPod template." >> "$GITHUB_STEP_SUMMARY"

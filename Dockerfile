@@ -37,8 +37,22 @@ RUN git clone https://github.com/Comfy-Org/ComfyUI-Manager.git /opt/ComfyUI/cust
 # The constraint keeps the PyTorch installed above, so no node can swap it out.
 # Pinned to a release. To change version, edit H3_EDITOR_REF (a tag like v0.4.1, or "main" for the newest).
 ARG H3_EDITOR_REF=v0.4.1
+# Our own changes to the editor, kept as patches per release: patches/<H3_EDITOR_REF>/*.patch.
+# 0001-project-archives adds Download as zip / Open a project zip to the project menu.
+# A patch that no longer fits the release, or a release with no patches folder, stops the build,
+# so an image never ships with the editor broken or the feature silently gone.
+# Build without them: docker build --build-arg H3_EDITOR_PATCHES=false .
+ARG H3_EDITOR_PATCHES=true
+COPY patches/ /opt/h3-editor-patches/
 RUN pip freeze | grep -iE "^(torch|torchvision|torchaudio)==" > /opt/torch-constraints.txt \
     && git clone --depth 1 --branch ${H3_EDITOR_REF} https://github.com/igorls/comfyui-h3-editor.git /opt/ComfyUI/custom_nodes/comfyui-h3-editor \
+    && if [ "${H3_EDITOR_PATCHES}" = "true" ]; then \
+         for p in /opt/h3-editor-patches/${H3_EDITOR_REF}/*.patch; do \
+           [ -e "$p" ] || { echo "No patches for H3 Editor ${H3_EDITOR_REF} in patches/. Add them, or build with H3_EDITOR_PATCHES=false"; exit 1; }; \
+           echo "Applying $(basename "$p")"; \
+           git -C /opt/ComfyUI/custom_nodes/comfyui-h3-editor apply "$p" || exit 1; \
+         done; \
+       fi \
     && pip install -r /opt/ComfyUI/custom_nodes/comfyui-h3-editor/requirements.txt -c /opt/torch-constraints.txt
 
 # Hugging Face CLI with Xet support (Xet-backed repos = fast downloads)

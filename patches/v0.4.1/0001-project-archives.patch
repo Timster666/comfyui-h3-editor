@@ -1,0 +1,841 @@
+From 6b6715d1cfd6e45f4a636dde9286c00c393ae91f Mon Sep 17 00:00:00 2001
+From: Tim Ellegaard <tim.ellegaard@gmail.com>
+Date: Fri, 13 Nov 2026 02:17:48 +0100
+Subject: [PATCH] Download a project as a zip and open a zip as a project
+
+Adds Download as zip and Open a project zip to the project menu, so a
+project can move between machines, such as cloud pods with no lasting
+disk. Downloads stream as they are packed and can carry the timeline's
+takes, every take, or no renders. Uploads go in 32 MB parts so proxies
+that cap request bodies do not stop large projects.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01JCCPHHtqCH84VoSzGnJap3
+---
+ CHANGELOG.md                       |  10 ++
+ README.md                          |  10 ++
+ archive.py                         | 208 +++++++++++++++++++++++++++++
+ editor/editor.css                  |   8 ++
+ editor/editor.js                   | 114 ++++++++++++++++
+ editor/index.html                  |  22 ++-
+ editor_api.py                      | 166 +++++++++++++++++++++++
+ skills/h3-editor/references/api.md |   4 +
+ tests/test_archive.py              | 149 +++++++++++++++++++++
+ 9 files changed, 690 insertions(+), 1 deletion(-)
+ create mode 100644 archive.py
+ create mode 100644 tests/test_archive.py
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 7e672ce..c5eaaf0 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -5,6 +5,16 @@ What changed in each release of H3 Editor, newest first. Versions follow
+ version can change how projects or the API behave, and the entry says so.
+ Each release is a tag on GitHub, `v` followed by the version.
+ 
++## Unreleased
++
++### Added
++
++- **Project archives.** The project menu has **Download as zip** and **Open a
++  project zip**, to take a project to another machine or a fresh cloud pod and
++  carry on there. A download carries the takes on the timeline, every take, or
++  no renders, and the dialog shows how large each choice is. For agents:
++  `GET /project/{name}/archive`, `POST /archive/part` and `POST /archive/open`.
++
+ ## 0.4.1, 2026-11-11
+ 
+ ### Added
+diff --git a/README.md b/README.md
+index 43dc9d1..4e48f85 100644
+--- a/README.md
++++ b/README.md
+@@ -175,6 +175,16 @@ on the server, so closing the editor never loses one. Every change is a
+ revision you can go back to, and two editors, or an editor and an agent, can
+ work on one project at once.
+ 
++**Taking a project away.** **Download as zip** in the same menu packs the open
++project into one zip: by default the takes the timeline shows, all footage,
++pictures and sound, or every take and export, or no renders at all. **Open a
++project zip** uploads one again, here or on another machine, and opens it as a
++project of its own. That is how to carry on with a cloud GPU that keeps no
++disk between sessions: download before the machine goes, open the zip on the
++next one. Takes left out can be rendered again, since the shots, seeds and
++settings stay in the zip. The upload goes in parts, so proxies that cap request
++size do not stop a large project.
++
+ | Key | Does |
+ |---|---|
+ | Space | Play or pause |
+diff --git a/archive.py b/archive.py
+new file mode 100644
+index 0000000..84ffe21
+--- /dev/null
++++ b/archive.py
+@@ -0,0 +1,208 @@
++"""Project archives: one project folder packed into a zip to take away, and a zip unpacked into a new project.
++
++A project is a folder inside h3take_projects. An archive holds that folder under its own name, with a
++small manifest beside project.json, so it can be opened again on another machine or a fresh cloud pod.
++No Comfy import, so the packing rules can be tested on their own.
++"""
++
++import copy
++import json
++import os
++import re
++import shutil
++import stat
++import zipfile
++
++try:
++    from . import project as store
++except ImportError:
++    import project as store
++
++FORMAT = 1
++MANIFEST = "h3-archive.json"
++# What a project folder holds that an archive leaves out: revisions start afresh, like a duplicate.
++SKIPPED_FOLDERS = ("history",)
++SKIPPED_ENDINGS = (".tmp",)
++# Renders are already compressed, so they are stored as they are and an archive packs fast.
++STORED = (".mp4", ".mov", ".webm", ".mkv", ".jpg", ".jpeg", ".png", ".webp", ".mp3", ".m4a", ".ogg", ".flac",
++          ".safetensors")
++MODES = {
++    "all": "Everything: every take, the exports and the pictures",
++    "timeline": "The takes the timeline shows, footage and pictures",
++    "none": "No renders: the shots, cast, pictures, sound and footage",
++}
++TAKE_ID = re.compile(r"t[0-9a-f]{8}")
++
++
++def _owners(project):
++    """Everything that has takes: clips, and VFX clips."""
++    return list(project.get("clips") or []) + list(project.get("effects") or [])
++
++
++def _keeps(project, owner, take, mode, shown):
++    if mode == "all" or take.get("quality") == "footage":
++        # Footage came from the person, not from a render, so it can never be made again.
++        return True
++    if mode == "none":
++        return False
++    active = store.active_take(owner)
++    return bool(active) and active.get("id") == take.get("id") and owner.get("id") in shown
++
++
++def pack_plan(project, mode):
++    """The project as the archive will hold it, and the ids of the takes it leaves out."""
++    if mode not in MODES:
++        raise ValueError("mode is one of %s" % ", ".join(MODES))
++    data = copy.deepcopy(project)
++    data["pending"] = []
++    data.pop("revision", None)
++    # A VFX clip draws over the cut by itself; a clip shows only when an item on the timeline points at it.
++    shown = {item.get("clip") for item in data.get("timeline") or []}
++    shown.update(effect.get("id") for effect in data.get("effects") or [])
++    dropped = set()
++    for owner in _owners(data):
++        takes = owner.get("takes") or []
++        kept = [t for t in takes if _keeps(project, owner, t, mode, shown)]
++        dropped.update(t["id"] for t in takes if t not in kept and t.get("id"))
++        if len(kept) != len(takes):
++            owner["takes"] = kept
++            if not any(t.get("id") == owner.get("active") for t in kept):
++                owner["active"] = kept[-1]["id"] if kept else None
++    return data, dropped
++
++
++def _left_out(relative, dropped, mode):
++    parts = relative.split("/")
++    if parts[0] in SKIPPED_FOLDERS or relative.endswith(SKIPPED_ENDINGS) or parts[-1] in ("project.json", MANIFEST):
++        return True
++    if parts[0] == "exports" and mode != "all":
++        return True
++    if parts[0] == "clips" and dropped:
++        # Every file a render leaves (the video, its poster, strip, sound peaks, held latent) carries its take's id.
++        return any(found in dropped for found in TAKE_ID.findall(parts[-1]))
++    return False
++
++
++def pack_files(folder_path, dropped, mode):
++    """(path on disk, path inside the project folder) for every file the archive carries."""
++    found = []
++    for base, folders, files in os.walk(folder_path):
++        folders[:] = sorted(f for f in folders if not os.path.islink(os.path.join(base, f)))
++        for name in sorted(files):
++            path = os.path.join(base, name)
++            if os.path.islink(path) or not os.path.isfile(path):
++                continue
++            relative = os.path.relpath(path, folder_path).replace(os.sep, "/")
++            if not _left_out(relative, dropped, mode):
++                found.append((path, relative))
++    return found
++
++
++def pack_size(files):
++    return sum(os.path.getsize(path) for path, _ in files)
++
++
++def write_archive(out, folder_path, folder, project, mode, version=""):
++    """Write the zip to `out`, which can be a stream that cannot seek, such as an HTTP response."""
++    data, dropped = pack_plan(project, mode)
++    files = pack_files(folder_path, dropped, mode)
++    manifest = {"format": FORMAT, "folder": folder, "name": data.get("name") or folder, "mode": mode,
++                "editor": version, "files": len(files), "bytes": pack_size(files), "left_out_takes": len(dropped)}
++    with zipfile.ZipFile(out, "w", allowZip64=True) as archive:
++        archive.writestr(folder + "/" + MANIFEST, json.dumps(manifest, indent=1), zipfile.ZIP_DEFLATED)
++        archive.writestr(folder + "/project.json", json.dumps(data, indent=1), zipfile.ZIP_DEFLATED)
++        for path, relative in files:
++            method = zipfile.ZIP_STORED if relative.lower().endswith(STORED) else zipfile.ZIP_DEFLATED
++            archive.write(path, folder + "/" + relative, method)
++    return manifest
++
++
++# Opening an archive.
++
++def _guess_folder(data):
++    """The folder a project's paths point into, for an archive made without a manifest."""
++    counts = {}
++
++    def walk(value):
++        if isinstance(value, dict):
++            for inner in value.values():
++                walk(inner)
++        elif isinstance(value, list):
++            for inner in value:
++                walk(inner)
++        elif isinstance(value, str):
++            match = re.match(r"%s[/\\]([^/\\]+)" % re.escape(store.ROOT), value)
++            if match:
++                counts[match.group(1)] = counts.get(match.group(1), 0) + 1
++
++    walk(data)
++    return max(counts, key=counts.get) if counts else None
++
++
++def _safe(name):
++    parts = name.replace("\\", "/").split("/")
++    return not (name.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", name) or ".." in parts)
++
++
++def find_project(archive):
++    """The folder inside the zip that holds project.json, as a prefix ending in / (or "" at the top)."""
++    names = [n for n in archive.namelist() if n.replace("\\", "/").split("/")[-1] == "project.json"]
++    names = [n for n in names if "/history/" not in n.replace("\\", "/")]
++    if not names:
++        raise ValueError("that zip has no project.json, so it is not an H3 Editor project")
++    # The shallowest one is the project; Colab's tars put it under h3take_projects/<name>/.
++    best = min(names, key=lambda n: n.replace("\\", "/").count("/"))
++    return best.replace("\\", "/")[: -len("project.json")]
++
++
++def unpack(zip_path, staging):
++    """Unpack the project in a zip into `staging`. Returns the project, its old folder and the manifest."""
++    with zipfile.ZipFile(zip_path) as archive:
++        prefix = find_project(archive)
++        try:
++            data = json.loads(archive.read(prefix + "project.json").decode("utf-8"))
++        except (KeyError, ValueError, UnicodeDecodeError):
++            raise ValueError("the project.json in that zip cannot be read")
++        if not isinstance(data, dict) or not isinstance(data.get("clips", []), list):
++            raise ValueError("the project.json in that zip is not an H3 Editor project")
++        manifest = {}
++        if prefix + MANIFEST in archive.namelist():
++            try:
++                manifest = json.loads(archive.read(prefix + MANIFEST).decode("utf-8"))
++            except ValueError:
++                manifest = {}
++        if int(manifest.get("format") or FORMAT) > FORMAT:
++            raise ValueError("that archive comes from a newer H3 Editor. Update this one to open it")
++        need = sum(i.file_size for i in archive.infolist())
++        free = shutil.disk_usage(os.path.dirname(os.path.abspath(staging)) or ".").free
++        if need > free:
++            raise ValueError("unpacking needs %.1f GB and the disk has %.1f GB free" % (need / 1e9, free / 1e9))
++        os.makedirs(staging, exist_ok=True)
++        top = os.path.realpath(staging)
++        for info in archive.infolist():
++            name = info.filename.replace("\\", "/")
++            if not name.startswith(prefix) or name.endswith("/"):
++                continue
++            relative = name[len(prefix):]
++            parts = relative.split("/")
++            if parts[-1] in ("project.json", MANIFEST) and len(parts) == 1 or parts[0] in SKIPPED_FOLDERS:
++                continue
++            if not _safe(relative) or stat.S_ISLNK(info.external_attr >> 16):
++                raise ValueError("that zip has a file outside its project folder (%s)" % info.filename)
++            target = os.path.realpath(os.path.join(staging, relative))
++            if not target.startswith(top + os.sep):
++                raise ValueError("that zip has a file outside its project folder (%s)" % info.filename)
++            os.makedirs(os.path.dirname(target), exist_ok=True)
++            with archive.open(info) as source, open(target, "wb") as sink:
++                shutil.copyfileobj(source, sink, 1 << 20)
++    old = manifest.get("folder") or _guess_folder(data) or prefix.strip("/").split("/")[-1] or None
++    return data, old, manifest
++
++
++def adopt(data, old, new, title):
++    """An unpacked project, pointed at the folder it now lives in and ready to be committed as revision 1."""
++    made = store.retarget(data, old, new) if old and old != new else copy.deepcopy(data)
++    made["name"] = title
++    made["pending"] = []
++    made.pop("revision", None)
++    return made
+diff --git a/editor/editor.css b/editor/editor.css
+index 04d7ace..9898d64 100644
+--- a/editor/editor.css
++++ b/editor/editor.css
+@@ -471,3 +471,11 @@ input[type="range"]:active::-webkit-slider-thumb { background: var(--tungsten);
+ @media (prefers-reduced-motion: reduce) {
+   *, *::before, *::after { transition: none !important; animation: none !important; }
+ }
++.archive-modes { margin: 0 0 12px; padding: 0; border: 0; display: grid; gap: 6px; }
++.archive-mode { display: flex; align-items: baseline; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius); cursor: pointer; }
++.archive-mode:has(input:checked) { border-color: var(--tungsten); background: var(--raised); }
++.archive-mode input { margin: 0; }
++.archive-mode span { flex: 1; }
++.archive-mode b { color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap; }
++a.primary.button[aria-disabled="true"] { opacity: 0.5; pointer-events: none; }
++#unarchiverBar { width: 100%; height: 8px; margin: 0 0 12px; accent-color: var(--tungsten); }
+diff --git a/editor/editor.js b/editor/editor.js
+index be53fbc..92ac2c1 100644
+--- a/editor/editor.js
++++ b/editor/editor.js
+@@ -4183,6 +4183,120 @@ $("projectDelete").addEventListener("click", async () => {
+   }
+ });
+ 
++// Archives: a project as one zip to take away, and a zip opened as a project again. The download is a plain
++// link, so the browser streams it to disk however large it is. The upload goes in parts, because the proxies
++// in front of cloud machines refuse large requests, and a part that fails is sent again.
++
++const ARCHIVE_PART = 32 * 1024 * 1024;
++const archiveSize = (bytes) => bytes >= 1e9 ? (bytes / 1e9).toFixed(1) + " GB" : Math.max(0.1, bytes / 1e6).toFixed(1) + " MB";
++
++function archiveLink(mode) {
++  $("archiverGo").href = "/h3take/api/project/" + encodeURIComponent(state.folder) + "/archive?mode=" + mode;
++}
++
++$("projectDownload").addEventListener("click", async () => {
++  const dialog = $("archiver");
++  const modes = $("archiverModes");
++  $("archiverNote").textContent = "Measuring the project.";
++  $("archiverGo").setAttribute("aria-disabled", "true");
++  modes.replaceChildren();
++  dialog.showModal();
++  try {
++    await flush();
++    const { modes: labels, sizes } = await api("/project/" + encodeURIComponent(state.folder) + "/archive/sizes");
++    for (const [mode, label] of Object.entries(labels)) {
++      const row = document.createElement("label");
++      row.className = "archive-mode";
++      const input = Object.assign(document.createElement("input"), { type: "radio", name: "archiveMode", value: mode, checked: mode === "timeline" });
++      input.addEventListener("change", () => archiveLink(mode));
++      const text = document.createElement("span");
++      text.textContent = label;
++      const size = document.createElement("b");
++      size.textContent = archiveSize(sizes[mode].bytes);
++      row.append(input, text, size);
++      modes.append(row);
++    }
++    archiveLink("timeline");
++    $("archiverGo").removeAttribute("aria-disabled");
++    $("archiverNote").textContent = "Takes left out can be rendered again from the zip: the shots, seeds and settings stay in it.";
++  } catch (error) {
++    $("archiverNote").textContent = error.message;
++  }
++});
++$("archiverClose").addEventListener("click", () => $("archiver").close());
++$("archiverGo").addEventListener("click", () => {
++  toast("The download starts in a moment. A large project keeps arriving for a while.");
++  setTimeout(() => $("archiver").close(), 300);
++});
++
++let archiveUpload = null;
++
++async function sendArchive(file) {
++  const id = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, "0")).join("");
++  const controller = new AbortController();
++  archiveUpload = controller;
++  const dialog = $("unarchiver");
++  $("unarchiverFile").textContent = file.name + ", " + archiveSize(file.size);
++  $("unarchiverBar").value = 0;
++  $("unarchiverNote").classList.remove("bad");
++  dialog.showModal();
++  const note = (text) => ($("unarchiverNote").textContent = text);
++  try {
++    let offset = 0;
++    let tries = 0;
++    while (offset < file.size || offset === 0) {
++      const part = file.slice(offset, offset + ARCHIVE_PART);
++      note("Uploading, " + archiveSize(offset) + " of " + archiveSize(file.size) + ".");
++      let response;
++      try {
++        response = await fetch("/h3take/api/archive/part?id=" + id + "&offset=" + offset,
++          { method: "POST", body: part, headers: { "Content-Type": "application/octet-stream" }, signal: controller.signal });
++      } catch (error) {
++        if (controller.signal.aborted) throw error;
++        if (++tries > 4) throw new Error("The upload kept failing. Check the connection and try again.");
++        await new Promise((resolve) => setTimeout(resolve, 1500 * tries));
++        continue;
++      }
++      const reply = await response.json().catch(() => ({}));
++      if (response.status === 409 && typeof reply.have === "number") {
++        offset = reply.have;
++        continue;
++      }
++      if (!response.ok) throw new Error(reply.error || "The upload failed (" + response.status + ").");
++      offset = reply.have;
++      tries = 0;
++      $("unarchiverBar").value = file.size ? offset / file.size : 1;
++      if (!file.size) break;
++    }
++    note("Unpacking the project. A large one takes a moment.");
++    $("unarchiverBar").removeAttribute("value");
++    const opened = await postJson("/archive/open", { id, client_id: clientId });
++    archiveUpload = null;
++    dialog.close();
++    await refreshProjects(opened.folder);
++    await openProject(opened.folder);
++    toast("Opened " + (opened.project.name || opened.folder) + ".");
++  } catch (error) {
++    if (controller.signal.aborted) return;
++    $("unarchiverNote").classList.add("bad");
++    note(error.message);
++  } finally {
++    archiveUpload = null;
++  }
++}
++
++$("projectUpload").addEventListener("click", async () => {
++  await flush();
++  $("archiveFile").value = "";
++  $("archiveFile").click();
++});
++$("archiveFile").addEventListener("change", () => {
++  const file = $("archiveFile").files[0];
++  if (file) sendArchive(file);
++});
++$("unarchiverClose").addEventListener("click", () => $("unarchiver").close());
++$("unarchiver").addEventListener("close", () => archiveUpload?.abort());
++
+ $("newClip").addEventListener("click", addClip);
+ $("addCast").addEventListener("click", addCastMember);
+ $("addVoice").addEventListener("click", addVoiceMember);
+diff --git a/editor/index.html b/editor/index.html
+index 7717d86..24f7ea6 100644
+--- a/editor/index.html
++++ b/editor/index.html
+@@ -11,10 +11,12 @@
+   <header class="bar">
+     <h1 class="sr">H3 Editor</h1>
+     <select id="project" aria-label="Project"></select>
+-    <button id="projectMore" class="tool" aria-label="Rename, duplicate or delete this project" title="Rename, duplicate or delete this project" aria-haspopup="menu" popovertarget="projectMenu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h.01M12 12h.01M18 12h.01" stroke-width="2.6"/></svg></button>
++    <button id="projectMore" class="tool" aria-label="Rename, duplicate, download or delete this project" title="Rename, duplicate, download or delete this project" aria-haspopup="menu" popovertarget="projectMenu"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h.01M12 12h.01M18 12h.01" stroke-width="2.6"/></svg></button>
+     <div id="projectMenu" class="menu" popover role="menu" aria-label="This project">
+       <button id="projectRename" role="menuitem"><b>Rename</b><span>Give this project another name</span></button>
+       <button id="projectDuplicate" role="menuitem"><b>Duplicate</b><span>A copy with its clips, takes and pictures, to try another cut</span></button>
++      <button id="projectDownload" role="menuitem"><b>Download as zip</b><span>Take this project away, with its takes, to open it on another machine</span></button>
++      <button id="projectUpload" role="menuitem"><b>Open a project zip</b><span>Upload a zip made with Download, and carry on where it stopped</span></button>
+       <button id="projectDelete" role="menuitem"><b>Delete</b><span>Move this project to the trash folder</span></button>
+     </div>
+     <button id="newProject" class="quiet">New project</button>
+@@ -146,6 +148,24 @@
+     <div class="exporter-foot"><span class="spacer"></span><button id="askerGo" class="primary" type="submit"></button></div>
+   </form>
+ </dialog>
++<dialog id="archiver" class="keys exporter" aria-labelledby="archiverTitle">
++  <div class="keys-head"><h2 id="archiverTitle">Download the project</h2><button id="archiverClose" class="quiet">Close</button></div>
++  <div class="exporter-body">
++    <p class="hint">One zip with everything needed to open this project again with <b>Open a project zip</b>, here or on another machine.</p>
++    <fieldset class="archive-modes" id="archiverModes"></fieldset>
++    <p id="archiverNote" class="hint" aria-live="polite"></p>
++  </div>
++  <div class="exporter-foot"><span class="spacer"></span><a id="archiverGo" class="primary button" download>Download</a></div>
++</dialog>
++<dialog id="unarchiver" class="keys exporter" aria-labelledby="unarchiverTitle">
++  <div class="keys-head"><h2 id="unarchiverTitle">Opening the project</h2><button id="unarchiverClose" class="quiet">Cancel</button></div>
++  <div class="exporter-body">
++    <p id="unarchiverFile" class="exporter-summary"></p>
++    <progress id="unarchiverBar" max="1" value="0"></progress>
++    <p id="unarchiverNote" class="hint" aria-live="polite"></p>
++  </div>
++</dialog>
++<input id="archiveFile" type="file" accept=".zip,application/zip" hidden>
+ <dialog id="exporter" class="keys exporter" aria-labelledby="exporterTitle">
+   <div class="keys-head"><h2 id="exporterTitle">Export the cut</h2><button id="exporterClose" class="quiet">Close</button></div>
+   <div class="exporter-body">
+diff --git a/editor_api.py b/editor_api.py
+index 9530515..3034a5c 100644
+--- a/editor_api.py
++++ b/editor_api.py
+@@ -6,16 +6,19 @@ import json
+ import logging
+ import math
+ import os
++import re
+ import shutil
+ import subprocess
+ import sys
+ import time
+ import uuid
++import zipfile
+ 
+ from aiohttp import web
+ 
+ import folder_paths
+ 
++from . import archive as archiver
+ from . import media
+ from . import project as store
+ from .policy import editor_id, group_by_model
+@@ -428,6 +431,165 @@ async def remove(request):
+     return web.json_response({"deleted": folder, "trash": "%s/%s/%s" % (store.ROOT, TRASH, kept)})
+ 
+ 
++# Archives. A project packed into one zip to download, and a zip uploaded in parts to open as a project,
++# so a cloud machine with no lasting disk can pick up where the last one stopped.
++
++INCOMING = ".incoming"
++ARCHIVE_PART = 64 * 1024 * 1024      # the most one upload request may carry; proxies in front of pods cap request bodies
++ARCHIVE_KEPT = 24 * 3600             # an upload nobody finished is cleared after a day
++UPLOAD_ID = re.compile(r"^[0-9a-f]{32}$")
++
++
++def pack_version():
++    try:
++        import tomllib
++
++        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "pyproject.toml"), "rb") as f:
++            return tomllib.load(f)["project"]["version"]
++    except Exception:
++        return ""
++
++
++async def archive_sizes(request):
++    """How large the archive of a project is for each choice of what to carry, before it is made."""
++    folder = store.slug(request.match_info["name"])
++    data = read_project(folder)
++    path = os.path.join(root(), folder)
++
++    def measure():
++        sizes = {}
++        for mode in archiver.MODES:
++            _, dropped = archiver.pack_plan(data, mode)
++            files = archiver.pack_files(path, dropped, mode)
++            sizes[mode] = {"bytes": archiver.pack_size(files), "files": len(files), "left_out_takes": len(dropped)}
++        return sizes
++
++    sizes = await asyncio.get_running_loop().run_in_executor(None, measure)
++    return web.json_response({"folder": folder, "modes": archiver.MODES, "sizes": sizes})
++
++
++class _ResponseSink:
++    """A file-like object a zip writer in a worker thread writes into, sent on to the browser as it comes."""
++
++    def __init__(self, response, loop):
++        self.response, self.loop, self.buffer = response, loop, bytearray()
++
++    def write(self, chunk):
++        self.buffer += chunk
++        if len(self.buffer) >= 1 << 20:
++            self.flush()
++        return len(chunk)
++
++    def flush(self):
++        if self.buffer:
++            block, self.buffer = bytes(self.buffer), bytearray()
++            asyncio.run_coroutine_threadsafe(self.response.write(block), self.loop).result()
++
++
++async def archive(request):
++    """Download a project as a zip. It streams as it is packed, so a large project starts arriving at once."""
++    folder = store.slug(request.match_info["name"])
++    mode = request.query.get("mode", "timeline")
++    if mode not in archiver.MODES:
++        return refused("mode is one of %s" % ", ".join(archiver.MODES))
++    async with lock(folder):
++        data = read_project(folder)
++    title = store.slug(data.get("name") or folder)
++    response = web.StreamResponse(headers={
++        "Content-Type": "application/zip",
++        "Content-Disposition": 'attachment; filename="%s.h3project.zip"' % title,
++        "Cache-Control": "no-store", "X-Accel-Buffering": "no"})
++    response.enable_chunked_encoding()
++    await response.prepare(request)
++    loop = asyncio.get_running_loop()
++    sink = _ResponseSink(response, loop)
++
++    def pack():
++        archiver.write_archive(sink, os.path.join(root(), folder), folder, data, mode, pack_version())
++        sink.flush()
++
++    try:
++        await loop.run_in_executor(None, pack)
++    except (ConnectionResetError, asyncio.CancelledError):
++        logging.info("[H3 Editor] the download of %s stopped before it finished", folder)
++        raise
++    await response.write_eof()
++    return response
++
++
++def incoming(upload_id):
++    if not UPLOAD_ID.match(upload_id or ""):
++        raise web.HTTPBadRequest(text="upload ids are 32 hex characters")
++    path = os.path.join(root(), INCOMING)
++    os.makedirs(path, exist_ok=True)
++    return os.path.join(path, upload_id + ".zip")
++
++
++def clear_incoming():
++    path = os.path.join(root(), INCOMING)
++    if not os.path.isdir(path):
++        return
++    for name in os.listdir(path):
++        full = os.path.join(path, name)
++        try:
++            if time.time() - os.path.getmtime(full) > ARCHIVE_KEPT:
++                shutil.rmtree(full) if os.path.isdir(full) else os.remove(full)
++        except OSError:
++            pass
++
++
++async def archive_part(request):
++    """One part of an archive being uploaded. Parts come in order; `offset` says where this one starts."""
++    target = incoming(request.query.get("id"))
++    offset = int(request.query.get("offset", 0))
++    if offset == 0:
++        await asyncio.get_running_loop().run_in_executor(None, clear_incoming)
++        if os.path.exists(target):
++            os.remove(target)
++    have = os.path.getsize(target) if os.path.exists(target) else 0
++    if offset != have:
++        return refused("this part starts at byte %d, the upload has %d" % (offset, have), 409, have=have)
++    written = 0
++    with open(target, "ab") as f:
++        async for chunk in request.content.iter_chunked(1 << 20):
++            written += len(chunk)
++            if written > ARCHIVE_PART:
++                f.truncate(offset)
++                return refused("send parts of at most %d MB" % (ARCHIVE_PART // (1 << 20)), 413)
++            f.write(chunk)
++    return web.json_response({"have": offset + written})
++
++
++async def archive_open(request):
++    """Open an uploaded archive as a project of its own. A name already taken gets a copy's name."""
++    body = await request.json()
++    upload = incoming(body.get("id"))
++    if not os.path.exists(upload):
++        return refused("no upload with that id. Upload the archive first", 404)
++    staging = upload[: -len(".zip")]
++    loop = asyncio.get_running_loop()
++    try:
++        data, old, manifest = await loop.run_in_executor(None, lambda: archiver.unpack(upload, staging))
++        names = project_folders()
++        taken = {n.lower() for n in names}
++        wanted = body.get("name") or data.get("name") or old or "Imported project"
++        title = store.clean_title(wanted)
++        if store.slug(title).lower() in taken or os.path.exists(os.path.join(root(), store.slug(title))):
++            title = store.copy_name(title, names)
++        made = store.slug(title)
++        if made.lower() in taken or os.path.exists(os.path.join(root(), made)):
++            return refused("there is already a project called %s" % title, 409)
++    except (ValueError, zipfile.BadZipFile) as error:
++        shutil.rmtree(staging, ignore_errors=True)
++        os.remove(upload)
++        return refused(plain(error) if isinstance(error, ValueError) else "that file is not a zip, or it did not arrive whole")
++    os.replace(staging, os.path.join(root(), made))
++    os.remove(upload)
++    async with lock(made):
++        commit(made, archiver.adopt(data, old, made, title), "import archive", body.get("client_id"))
++    return web.json_response({"folder": made, "project": read_project(made), "from": old, "mode": manifest.get("mode")})
++
++
+ async def projects(request):
+     names = project_folders()
+     available = available_models()
+@@ -1181,6 +1343,10 @@ ROUTES = (
+     ("DELETE", "/h3take/api/project/{name}", "remove"),
+     ("POST", "/h3take/api/project/{name}/rename", "rename"),
+     ("POST", "/h3take/api/project/{name}/duplicate", "duplicate"),
++    ("GET", "/h3take/api/project/{name}/archive", "archive"),
++    ("GET", "/h3take/api/project/{name}/archive/sizes", "archive_sizes"),
++    ("POST", "/h3take/api/archive/part", "archive_part"),
++    ("POST", "/h3take/api/archive/open", "archive_open"),
+     ("GET", "/h3take/api/project/{name}/summary", "summary"),
+     ("GET", "/h3take/api/project/{name}/history", "history"),
+     ("POST", "/h3take/api/project/{name}/restore", "restore"),
+diff --git a/skills/h3-editor/references/api.md b/skills/h3-editor/references/api.md
+index 072d0a9..238dc8c 100644
+--- a/skills/h3-editor/references/api.md
++++ b/skills/h3-editor/references/api.md
+@@ -19,6 +19,10 @@ except the two uploads.
+ |---|---|---|
+ | `POST /project/{name}/rename` | `{"name"}` | The name the project shows. Its folder, which is what `{name}` in every path means, stays as it was made. Returns `{"folder", "project"}` |
+ | `POST /project/{name}/duplicate` | optional `{"name"}` | A copy in a folder of its own, with its clips, takes and pictures, and no renders pending. The default name is the original's with `copy` after it. Returns `{"folder", "project"}`; 409 when the name is taken |
++| `GET /project/{name}/archive?mode=` | | The project as a zip, streamed as it is packed: `<folder>/project.json`, `<folder>/h3-archive.json` (a manifest) and its files, never its history. `mode` is `timeline` (default: the active take of each clip on the timeline, every VFX clip's active take, all footage, pictures and sound), `all` (every take and the exports too) or `none` (no renders; footage, pictures and sound stay). Takes left out are taken out of the archive's project.json too |
++| `GET /project/{name}/archive/sizes` | | `{"modes": {mode: label}, "sizes": {mode: {"bytes", "files", "left_out_takes"}}}`, before downloading |
++| `POST /archive/part?id=&offset=` | the bytes of one part | Uploads an archive in parts of at most 64 MB, in order. `id` is 32 hex characters you choose; `offset` is where the part starts, 0 for the first, which starts the upload afresh. Returns `{"have"}`; 409 with `have` when the offset is not where the upload stands |
++| `POST /archive/open` | `{"id", "name"?}` | Opens the uploaded zip as a new project, its paths pointed at its new folder, at revision 1. A name already taken gets `copy` after it. Also opens a zip of a project folder made by hand, or with `h3take_projects/<folder>/` inside. Returns `{"folder", "project", "from", "mode"}` |
+ | `DELETE /project/{name}` | | Moves the project's folder to `h3take_projects/.trash`; nothing is erased. Refused with 409 while it is rendering. Do this only when the user asks. Returns `{"deleted", "trash"}` |
+ | `GET /projects` | | `{"projects": [folder, ...], "titles": {folder: name, ...}, "profiles": [{"id", "title", "hint", "available", "missing"}, ...], "finals": [note, ...], "loras": [file, ...], "realism": {"file", "strength", "installed", "range", "lora_range", "limit"}, "checkpoints": [file, ...], "samplers": [name, ...], "schedulers": [name, ...]}`. Each profile also carries its `steps`, `sampler` and `scheduler`. `finals` says what finals leave out because a file is missing, `loras` lists every file in `models/loras`, and `realism` describes the Realism Slider that finals run |
+ | `POST /projects` | `{"name"}` | `{"folder", "project"}`. Opens it if it exists |
+diff --git a/tests/test_archive.py b/tests/test_archive.py
+new file mode 100644
+index 0000000..3583af8
+--- /dev/null
++++ b/tests/test_archive.py
+@@ -0,0 +1,149 @@
++import io
++import json
++import os
++import tempfile
++import unittest
++import zipfile
++
++import archive
++
++
++def take(clip, take_id, quality="draft"):
++    return {"id": take_id, "file": "%s_%s_00001_.mp4" % (clip, take_id), "subfolder": "h3take_projects/Scene/clips",
++            "poster": "%s_%s_00001_.jpg" % (clip, take_id), "frames": 90, "quality": quality, "seed": 1}
++
++
++def project():
++    return {
++        "name": "Scene", "revision": 7, "pending": [{"clip": "c00000001"}],
++        "cast": [{"id": "m1", "pictures": [{"file": "a.png", "subfolder": "h3take_projects/Scene/assets"}]}],
++        "clips": [
++            {"id": "c00000001", "takes": [take("c00000001", "t0000000a"), take("c00000001", "t0000000b")], "active": "t0000000a"},
++            {"id": "c00000002", "takes": [take("c00000002", "t0000000c")], "active": "t0000000c"},
++            {"id": "c00000003", "takes": [take("c00000003", "t0000000d", "footage")], "active": "t0000000d"},
++        ],
++        "effects": [{"id": "e1", "start": 0, "takes": [{"id": "t0000000e", "file": "fx_t0000000e.mp4"}], "active": "t0000000e"}],
++        "timeline": [{"id": "i1", "clip": "c00000001", "start": 0, "in": 0, "out": 90}],
++    }
++
++
++class ArchiveTest(unittest.TestCase):
++    def setUp(self):
++        self.temp = tempfile.TemporaryDirectory()
++        self.folder = os.path.join(self.temp.name, "Scene")
++        files = ["assets/a.png", "exports/cut.mp4", "history/000007.json", "project.json", "clips/x.mp4.tmp",
++                 "clips/c00000001_t0000000a.hold.safetensors"]
++        for t in ("t0000000a", "t0000000b"):
++            files += ["clips/c00000001_%s_00001_.mp4" % t, "clips/c00000001_%s_00001_.jpg" % t,
++                      "clips/c00000001_%s_00001_.strip.jpg" % t]
++        files += ["clips/c00000002_t0000000c_00001_.mp4", "clips/c00000003_t0000000d_00001_.mp4", "clips/fx_t0000000e.mp4"]
++        for name in files:
++            path = os.path.join(self.folder, name)
++            os.makedirs(os.path.dirname(path), exist_ok=True)
++            with open(path, "w") as f:
++                f.write(name)
++        with open(os.path.join(self.folder, "project.json"), "w") as f:
++            json.dump(project(), f)
++
++    def tearDown(self):
++        self.temp.cleanup()
++
++    def packed(self, mode):
++        out = io.BytesIO()
++        archive.write_archive(out, self.folder, "Scene", project(), mode, "test")
++        out.seek(0)
++        return zipfile.ZipFile(out)
++
++    def test_timeline_keeps_shown_takes_footage_and_effects(self):
++        data, dropped = archive.pack_plan(project(), "timeline")
++        self.assertEqual(dropped, {"t0000000b", "t0000000c"})
++        clips = {c["id"]: c for c in data["clips"]}
++        self.assertEqual([t["id"] for t in clips["c00000001"]["takes"]], ["t0000000a"])
++        self.assertEqual(clips["c00000002"]["takes"], [])
++        self.assertIsNone(clips["c00000002"]["active"])
++        self.assertEqual(clips["c00000003"]["active"], "t0000000d")
++        self.assertEqual(data["effects"][0]["active"], "t0000000e")
++        self.assertEqual(data["pending"], [])
++        self.assertNotIn("revision", data)
++
++    def test_none_keeps_only_footage(self):
++        _, dropped = archive.pack_plan(project(), "none")
++        self.assertEqual(dropped, {"t0000000a", "t0000000b", "t0000000c", "t0000000e"})
++
++    def test_files_follow_the_takes(self):
++        names = set(self.packed("timeline").namelist())
++        self.assertIn("Scene/clips/c00000001_t0000000a_00001_.mp4", names)
++        self.assertIn("Scene/clips/c00000001_t0000000a.hold.safetensors", names)
++        self.assertIn("Scene/clips/c00000003_t0000000d_00001_.mp4", names)
++        self.assertIn("Scene/assets/a.png", names)
++        self.assertIn("Scene/h3-archive.json", names)
++        for gone in ("Scene/clips/c00000001_t0000000b_00001_.mp4", "Scene/clips/c00000001_t0000000b_00001_.strip.jpg",
++                     "Scene/clips/c00000002_t0000000c_00001_.mp4", "Scene/exports/cut.mp4", "Scene/history/000007.json",
++                     "Scene/clips/x.mp4.tmp"):
++            self.assertNotIn(gone, names)
++        everything = set(self.packed("all").namelist())
++        self.assertIn("Scene/exports/cut.mp4", everything)
++        self.assertIn("Scene/clips/c00000001_t0000000b_00001_.mp4", everything)
++        self.assertNotIn("Scene/history/000007.json", everything)
++
++    def test_a_zip_written_to_a_stream_that_cannot_seek_opens(self):
++        class Pipe:
++            def __init__(self):
++                self.data = bytearray()
++
++            def write(self, chunk):
++                self.data += chunk
++                return len(chunk)
++
++            def flush(self):
++                pass
++
++        pipe = Pipe()
++        archive.write_archive(pipe, self.folder, "Scene", project(), "all")
++        with zipfile.ZipFile(io.BytesIO(bytes(pipe.data))) as z:
++            self.assertIsNone(z.testzip())
++
++    def test_unpack_and_adopt_into_another_folder(self):
++        path = os.path.join(self.temp.name, "in.zip")
++        with open(path, "wb") as f:
++            f.write(self.packed("timeline").fp.getvalue())
++        staging = os.path.join(self.temp.name, "staging")
++        data, old, manifest = archive.unpack(path, staging)
++        self.assertEqual((old, manifest["mode"]), ("Scene", "timeline"))
++        self.assertTrue(os.path.exists(os.path.join(staging, "clips", "c00000001_t0000000a_00001_.mp4")))
++        self.assertFalse(os.path.exists(os.path.join(staging, "project.json")))
++        self.assertFalse(os.path.exists(os.path.join(staging, archive.MANIFEST)))
++        made = archive.adopt(data, old, "Scene_copy", "Scene copy")
++        self.assertEqual(made["clips"][0]["takes"][0]["subfolder"], "h3take_projects/Scene_copy/clips")
++        self.assertEqual(made["cast"][0]["pictures"][0]["subfolder"], "h3take_projects/Scene_copy/assets")
++        self.assertEqual(made["name"], "Scene copy")
++
++    def test_a_plain_zip_of_the_folder_opens_too(self):
++        # Zipped by hand, or from Colab's h3take_projects/<name>/ layout, with no manifest.
++        path = os.path.join(self.temp.name, "hand.zip")
++        with zipfile.ZipFile(path, "w") as z:
++            z.writestr("h3take_projects/Scene/project.json", json.dumps(project()))
++            z.writestr("h3take_projects/Scene/assets/a.png", "a")
++        data, old, _ = archive.unpack(path, os.path.join(self.temp.name, "s2"))
++        self.assertEqual(old, "Scene")
++        self.assertTrue(os.path.exists(os.path.join(self.temp.name, "s2", "assets", "a.png")))
++
++    def test_a_zip_reaching_outside_is_refused(self):
++        path = os.path.join(self.temp.name, "bad.zip")
++        with zipfile.ZipFile(path, "w") as z:
++            z.writestr("Scene/project.json", json.dumps(project()))
++            z.writestr("Scene/../../evil.txt", "x")
++        with self.assertRaises(ValueError):
++            archive.unpack(path, os.path.join(self.temp.name, "s3"))
++        self.assertFalse(os.path.exists(os.path.join(self.temp.name, "evil.txt")))
++
++    def test_a_zip_with_no_project_is_refused(self):
++        path = os.path.join(self.temp.name, "empty.zip")
++        with zipfile.ZipFile(path, "w") as z:
++            z.writestr("notes.txt", "x")
++        with self.assertRaises(ValueError):
++            archive.unpack(path, os.path.join(self.temp.name, "s4"))
++
++
++if __name__ == "__main__":
++    unittest.main()
+-- 
+2.43.0
+
